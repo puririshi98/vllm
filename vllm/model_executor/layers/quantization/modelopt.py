@@ -2003,7 +2003,26 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
         routing_replay_out: torch.Tensor | None = None,
+        *,
+        x_mxfp8: torch.Tensor | None = None,
+        x_mxfp8_scale: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Run the FlashInfer TRTLLM MXFP8 MoE.
+
+        Fix D opt-in: if `x_mxfp8` and `x_mxfp8_scale` are both passed,
+        skip the internal `mxfp8_e4m3_quantize(x, is_sf_swizzled_layout=False)`
+        and feed the pre-quantized tensors directly to the kernel. The
+        bf16 `x` is still required for shape/dtype assertions and for
+        `routing_replay_out` slicing. The pre-quantized tensors must
+        match the production layout that `mxfp8_e4m3_quantize` emits with
+        `is_sf_swizzled_layout=False`: `x_mxfp8` is `[M, K] fp8_e4m3fn`,
+        `x_mxfp8_scale` is `[M, K//32] uint8` (linear / un-swizzled —
+        see tools/microbench_fix_b.py for the Fix B disproof that pinned
+        this layout).
+
+        When `x_mxfp8` is None (default), behaviour is bit-identical to
+        the pre-Fix-D path.
+        """
         from flashinfer.fused_moe.core import (
             ActivationType,
             Fp8QuantizationType,
@@ -2043,15 +2062,32 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
         n_group = layer.num_expert_group or None
         topk_group = layer.topk_group or None
 
-        hidden_states_mxfp8, hidden_states_scale = mxfp8_e4m3_quantize(
-            x,
-            # MUST be False: flashinfer.fused_moe.trtllm_fp8_block_scale_moe
-            # asserts on the per-token [M, H/32] scale shape (linear layout).
-            # The 128x4 swizzled layout the Linear/CUTLASS path uses produces
-            # a flat (M_padded*K_padded,) shape that the MoE kernel rejects.
-            # See tools/microbench_fix_b.py for the reproduction.
-            is_sf_swizzled_layout=False,
-        )
+        if x_mxfp8 is not None and x_mxfp8_scale is not None:
+            # Fix D opt-in path: caller already quantized x (typically because
+            # the previous Linear in latent-MoE could emit fp8 directly).
+            # Skip the internal quantize and feed the kernel directly.
+            assert x_mxfp8.dtype == torch.float8_e4m3fn, (
+                f"x_mxfp8 dtype must be fp8_e4m3fn, got {x_mxfp8.dtype}"
+            )
+            assert x_mxfp8_scale.dtype == torch.uint8, (
+                f"x_mxfp8_scale dtype must be uint8, got {x_mxfp8_scale.dtype}"
+            )
+            assert x_mxfp8.shape == x.shape, (
+                f"x_mxfp8 shape {x_mxfp8.shape} must match x.shape {x.shape}"
+            )
+            hidden_states_mxfp8 = x_mxfp8
+            hidden_states_scale = x_mxfp8_scale
+        else:
+            hidden_states_mxfp8, hidden_states_scale = mxfp8_e4m3_quantize(
+                x,
+                # MUST be False: flashinfer.fused_moe.trtllm_fp8_block_scale_moe
+                # asserts on the per-token [M, H/32] scale shape (linear
+                # layout). The 128x4 swizzled layout the Linear/CUTLASS path
+                # uses produces a flat (M_padded*K_padded,) shape that the
+                # MoE kernel rejects. See tools/microbench_fix_b.py for the
+                # reproduction.
+                is_sf_swizzled_layout=False,
+            )
 
         # Slice routing_replay_out to match num_tokens (FlashInfer validates)
         if routing_replay_out is not None:

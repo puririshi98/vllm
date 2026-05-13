@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from enum import Enum
 
 import torch
@@ -21,6 +22,22 @@ class Mxfp8LinearBackend(Enum):
 MXFP8_VALUE_DTYPE = torch.float8_e4m3fn
 MXFP8_SCALE_DTYPE = torch.uint8
 MXFP8_BLOCK_SIZE = 32
+
+# Opt-in flag for Fix F: skip the M -> 128-multiple padding in the
+# FlashInfer-CUTLASS Linear path. Microbench on flashinfer 0.6.10 + GB200
+# showed the pad costs 8-22% per call at M ∈ {1..96} with bit-identical
+# output; older flashinfer versions may have required the pad. Default
+# is OFF (existing behavior) to be safe across container versions. Set
+# VLLM_MXFP8_DISABLE_M_PAD=1 on the worker to enable the optimization
+# once you've verified your flashinfer accepts non-128-aligned M.
+# See tools/microbench_mxfp8_linear_v2.py for the in-tree evidence.
+_DISABLE_M_PAD = os.environ.get("VLLM_MXFP8_DISABLE_M_PAD", "0") == "1"
+if _DISABLE_M_PAD:
+    logger.info_once(
+        "VLLM_MXFP8_DISABLE_M_PAD=1 set: MXFP8 Linear skips the M -> 128 "
+        "padding (Fix F). Requires flashinfer mm_mxfp8 that handles "
+        "non-128-aligned M (>= 0.6.x verified)."
+    )
 
 
 def swizzle_mxfp8_scale(sf: torch.Tensor, M: int, K: int) -> torch.Tensor:
@@ -188,10 +205,18 @@ class Mxfp8LinearOp:
             f"out_features is too small for mm_mxfp8."
         )
 
-        M_padded = ((M_orig + min_dim - 1) // min_dim) * min_dim
-        if M_padded != M_orig:
-            pad_rows = M_padded - M_orig
-            input_2d = torch.nn.functional.pad(input_2d, (0, 0, 0, pad_rows))
+        # Fix F: skip the M -> 128-multiple pad when explicitly opted in.
+        # On flashinfer >= 0.6.x the pad is a no-op pessimization at small
+        # batches (8-22% slowdown at M ∈ {1..96}; identical output).
+        if _DISABLE_M_PAD:
+            M_padded = M_orig
+        else:
+            M_padded = ((M_orig + min_dim - 1) // min_dim) * min_dim
+            if M_padded != M_orig:
+                pad_rows = M_padded - M_orig
+                input_2d = torch.nn.functional.pad(
+                    input_2d, (0, 0, 0, pad_rows)
+                )
 
         input_mxfp8, input_scale = mxfp8_e4m3_quantize(
             input_2d,

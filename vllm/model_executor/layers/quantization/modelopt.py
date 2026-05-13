@@ -2012,7 +2012,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
 
         hidden_states_mxfp8, hidden_states_scale = mxfp8_e4m3_quantize(
             x,
-            is_sf_swizzled_layout=False,
+            is_sf_swizzled_layout=True,
         )
 
         # Slice routing_replay_out to match num_tokens (FlashInfer validates)

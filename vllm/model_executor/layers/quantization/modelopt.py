@@ -2012,7 +2012,12 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
 
         hidden_states_mxfp8, hidden_states_scale = mxfp8_e4m3_quantize(
             x,
-            is_sf_swizzled_layout=True,
+            # MUST be False: flashinfer.fused_moe.trtllm_fp8_block_scale_moe
+            # asserts on the per-token [M, H/32] scale shape (linear layout).
+            # The 128x4 swizzled layout the Linear/CUTLASS path uses produces
+            # a flat (M_padded*K_padded,) shape that the MoE kernel rejects.
+            # See tools/microbench_fix_b.py for the reproduction.
+            is_sf_swizzled_layout=False,
         )
 
         # Slice routing_replay_out to match num_tokens (FlashInfer validates)

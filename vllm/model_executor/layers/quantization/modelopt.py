@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from fnmatch import fnmatch
 from typing import TYPE_CHECKING, Any
 
@@ -141,7 +142,39 @@ class ModelOptQuantConfigBase(QuantizationConfig):
         exclude_modules: list[str],
     ):
         super().__init__()
+        # Fix C: allow appending exclude patterns from the environment so
+        # operators can keep specific Linears at unquantized (BF16) without
+        # re-emitting the checkpoint. Patterns are comma-separated wildcards
+        # in the same format as `exclude_modules` in hf_quant_config.json
+        # (substring match + fnmatch wildcards via `is_layer_excluded`).
+        #
+        # Typical NemotronH-rollout recipe — keep the bulk-weight MoE
+        # experts and shared expert MLP quantized, drop quantize overhead
+        # from the small Linears:
+        #
+        #   VLLM_MODELOPT_EXTRA_EXCLUDE_MODULES=
+        #     "*qkv_proj,*o_proj,*gate,*fc1_latent_proj,*fc2_latent_proj,
+        #      *mixer.in_proj,*mixer.out_proj,*mixer.conv1d"
+        #
+        # See HANDOFF.md §7 Fix C and tools/EXCLUDE_RECIPE.md.
+        extra_patterns = self._read_extra_exclude_env()
+        if extra_patterns:
+            exclude_modules = list(exclude_modules) + extra_patterns
+            logger.info_once(
+                "VLLM_MODELOPT_EXTRA_EXCLUDE_MODULES: appended %d "
+                "pattern(s) to ModelOpt exclude_modules: %s",
+                len(extra_patterns), extra_patterns,
+            )
         self.exclude_modules: list[str] = exclude_modules
+
+    @staticmethod
+    def _read_extra_exclude_env() -> list[str]:
+        raw = os.environ.get(
+            "VLLM_MODELOPT_EXTRA_EXCLUDE_MODULES", ""
+        ).strip()
+        if not raw:
+            return []
+        return [p.strip() for p in raw.split(",") if p.strip()]
 
     def is_layer_excluded(self, prefix: str) -> bool:
         """

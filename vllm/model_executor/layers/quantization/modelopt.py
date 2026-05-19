@@ -163,7 +163,7 @@ class ModelOptQuantConfigBase(QuantizationConfig):
             logger.info_once(
                 "VLLM_MODELOPT_EXTRA_EXCLUDE_MODULES: appended %d "
                 "pattern(s) to ModelOpt exclude_modules: %s",
-                len(extra_patterns), extra_patterns,
+                len(extra_patterns), ", ".join(extra_patterns),
             )
         self.exclude_modules: list[str] = exclude_modules
 

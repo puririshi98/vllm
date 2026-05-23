@@ -15,6 +15,7 @@ from vllm.platforms import current_platform
 from vllm.utils import flashinfer as vllm_flashinfer
 
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
+from .triton_smallm import mxfp8_smallm_gemm
 
 
 class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
@@ -46,6 +47,16 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
             layer.weight_scale_for_apply = Parameter(
                 weight_scale_swizzled.contiguous(), requires_grad=False
             )
+
+        # nemo-speed-final: also cache the un-swizzled weight_scale [N, K/32]
+        # so the Triton small-M GEMM kernel can index it row-major. The
+        # FlashInfer mm_mxfp8 path uses weight_scale_for_apply (swizzled).
+        if os.environ.get("MXFP8_TRITON_SMALLM") == "1":
+            ws_raw = weight_scale_2d.contiguous()
+            if hasattr(layer, "weight_scale_raw"):
+                layer.weight_scale_raw.data.copy_(ws_raw)
+            else:
+                layer.weight_scale_raw = Parameter(ws_raw, requires_grad=False)
 
         # iter8 nemo-speed (opt-in via MXFP8_BF16_FALLBACK_SMALL_M=1):
         # cache a BF16-dequantized copy of the weight for use at small M
@@ -81,6 +92,27 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
         input_shape = x.shape
         input_2d = x.view(-1, K)
         M_orig = input_2d.shape[0]
+
+        # nemo-speed-final: Triton MXFP8 GEMM for small M. Bypasses mm_mxfp8s
+        # 128-row tile padding (smoke M=32, ab_mid/ab_decode/swe M=64). Opt-in
+        # via MXFP8_TRITON_SMALLM=1. process_weights_after_loading allocated
+        # layer.weight_scale_raw (un-swizzled) when the env var is set at boot.
+        if (
+            M_orig < 128
+            and hasattr(layer, "weight_scale_raw")
+            and os.environ.get("MXFP8_TRITON_SMALLM") == "1"
+        ):
+            input_mxfp8_unsw, input_scale_unsw = mxfp8_e4m3_quantize(
+                input_2d, is_sf_swizzled_layout=False
+            )
+            output_tri = mxfp8_smallm_gemm(
+                input_mxfp8_unsw, input_scale_unsw,
+                weight if weight.is_contiguous() else weight.contiguous(),
+                layer.weight_scale_raw,
+            )
+            if bias is not None:
+                output_tri = output_tri + bias
+            return output_tri.view(*input_shape[:-1], N).to(out_dtype)
 
         # iter8 nemo-speed: BF16 fallback for small M. mm_mxfp8 pads M up to
         # 128 and processes a full 128-row tile regardless, wasting compute

@@ -193,8 +193,8 @@ def mxfp8_smallm_gemm(
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         SCALE_BLOCK=SCALE_BLOCK,
-        num_warps=4,
-        num_stages=3,
+        num_warps=8,
+        num_stages=4,
     )
 
     return output

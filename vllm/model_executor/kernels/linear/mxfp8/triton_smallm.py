@@ -75,27 +75,26 @@ if _HAS_TRITON:
         for k_block in range(0, num_k_blocks):
             k_abs = k_block * SCALE_BLOCK + offs_k  # 32 element offsets
 
-            # Load input tile [BLOCK_M, SCALE_BLOCK] in fp8 — KEEP fp8 dtype
+            # Load input tile [BLOCK_M, SCALE_BLOCK] in fp8
             in_block = tl.load(
                 input_ptr
                 + offs_m[:, None] * stride_im
                 + k_abs[None, :] * stride_ik,
                 mask=m_mask[:, None],
                 other=0.0,
-            )
+            ).to(tl.bfloat16)
 
-            # Load weight tile [BLOCK_N, SCALE_BLOCK] in fp8 — KEEP fp8 dtype
+            # Load weight tile [BLOCK_N, SCALE_BLOCK] in fp8
             w_block = tl.load(
                 weight_ptr
                 + offs_n[:, None] * stride_wn
                 + k_abs[None, :] * stride_wk,
                 mask=n_mask[:, None],
                 other=0.0,
-            )
+            ).to(tl.bfloat16)
 
-            # Native FP8 tl.dot — dispatches to Blackwell FP8 mma instead of
-            # bf16 mma. Output accumulator is fp32 by default.
-            block_dot = tl.dot(in_block, w_block.T, out_dtype=tl.float32)
+            # Block dot product: [BLOCK_M, BLOCK_N] in fp32
+            block_dot = tl.dot(in_block, w_block.T).to(tl.float32)
 
             # Load per-block scales (uint8 e8m0 biased exponents)
             in_scale_u = tl.load(

@@ -120,7 +120,9 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
         # weight_bf16 lets us do a plain bf16 matmul instead. Only enabled
         # if MXFP8_BF16_FALLBACK_SMALL_M=1 was set at startup so
         # process_weights_after_loading allocated weight_bf16.
-        if M_orig < 128 and hasattr(layer, "weight_bf16"):
+        # iter18: profile showed mm_mxfp8 is 1.4-3.7x SLOWER than bf16 matmul
+        # at all M tested (96-256). Use bf16 for ALL calls when weight_bf16 cached.
+        if hasattr(layer, "weight_bf16"):
             input_bf16 = input_2d.to(torch.bfloat16)
             output = torch.matmul(input_bf16, layer.weight_bf16.t())
             if bias is not None:

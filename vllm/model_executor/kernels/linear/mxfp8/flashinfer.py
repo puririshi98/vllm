@@ -58,13 +58,13 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
             else:
                 layer.weight_scale_raw = Parameter(ws_raw, requires_grad=False)
 
-        # iter8 nemo-speed (opt-in via MXFP8_BF16_FALLBACK_SMALL_M=1):
+        # iter8 nemo-speed (opt-in via VLLM_MXFP8_BF16_FALLBACK_SMALL_M=1):
         # cache a BF16-dequantized copy of the weight for use at small M
         # where mm_mxfp8 has to pad the input up to 128 rows and waste 75%
         # of GEMM compute. Doubles linear-weight memory but unlocks the
         # mid-concurrency regime where harness configs ab_mid/ab_decode_heavy/
         # swe_192k_512 spend most of their time.
-        if os.environ.get("MXFP8_BF16_FALLBACK_SMALL_M") == "1":
+        if os.environ.get("VLLM_MXFP8_BF16_FALLBACK_SMALL_M") == "1":
             # Dequantize:  bf16 = fp8.to(bf16) * 2^(scale_biased - 127)
             # weight_scale_2d is e8m0 biased exponent stored in uint8.
             descale = torch.exp2(
@@ -118,7 +118,7 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
         # 128 and processes a full 128-row tile regardless, wasting compute
         # at M < 128 (smoke = 32, ab_mid/ab_decode/swe = 64). The cached
         # weight_bf16 lets us do a plain bf16 matmul instead. Only enabled
-        # if MXFP8_BF16_FALLBACK_SMALL_M=1 was set at startup so
+        # if VLLM_MXFP8_BF16_FALLBACK_SMALL_M=1 was set at startup so
         # process_weights_after_loading allocated weight_bf16.
         if M_orig < 128 and hasattr(layer, "weight_bf16"):
             input_bf16 = input_2d.to(torch.bfloat16)

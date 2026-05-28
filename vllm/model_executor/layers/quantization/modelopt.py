@@ -1911,8 +1911,127 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             )
             layer.w2_scale_for_apply = Parameter(w2_scale_for_apply, requires_grad=False)
 
+    # V50 HYBRID MOE: class counter — cap bf16 cached MoE layers per worker
+    # to keep total cache size bounded by VLLM_MXFP8_HYBRID_MOE_BF16_MAX_LAYERS.
+    _hybrid_moe_bf16_count = 0
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        import os as _osdbg
+        _on = _osdbg.environ.get("VLLM_MXFP8_HYBRID_MOE_BF16")
+        _ml = _osdbg.environ.get("VLLM_MXFP8_HYBRID_MOE_BF16_MAX_LAYERS")
+        # Write to a sentinel file so we KNOW this function was called
+        try:
+            with open("/tmp/v50_called.log", "a") as _f:
+                _f.write(f"V50 process_weights called on={_on!r} max_layers={_ml!r} count={ModelOptMxFp8FusedMoE._hybrid_moe_bf16_count}\n")
+        except Exception:
+            pass
+        # Also print
+        import sys
+        sys.stderr.write(
+            f"[V50 STDERR] process_weights_after_loading "
+            f"on={_on!r} max_layers={_ml!r} count={ModelOptMxFp8FusedMoE._hybrid_moe_bf16_count}\n"
+        )
+        sys.stderr.flush()
+        print(
+            f"[V50 DEBUG] process_weights_after_loading "
+            f"on={_on!r} max_layers={_ml!r} count={ModelOptMxFp8FusedMoE._hybrid_moe_bf16_count}",
+            flush=True,
+        )
         self._check_weight_dtypes(layer)
+        # V50 HYBRID MOE: dequantize a SUBSET of layers fp8 expert weights to
+        # bf16 before the in-place shuffle destroys the source layout. The
+        # subset is bounded by VLLM_MXFP8_HYBRID_MOE_BF16_MAX_LAYERS so the bf16
+        # cache fits alongside the fp8 model on the same GPU.
+        import os
+        _max_layers = int(os.environ.get("VLLM_MXFP8_HYBRID_MOE_BF16_MAX_LAYERS", "0"))
+        _try_hybrid = (
+            os.environ.get("VLLM_MXFP8_HYBRID_MOE_BF16") == "1"
+            and _max_layers > 0
+            and ModelOptMxFp8FusedMoE._hybrid_moe_bf16_count < _max_layers
+        )
+        if _try_hybrid:
+            ModelOptMxFp8FusedMoE._hybrid_moe_bf16_count += 1
+            from torch.nn.parameter import Parameter
+            from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+                dequant_mxfp8_to_bf16,
+            )
+            with torch.no_grad():
+                E13 = layer.w13_weight.shape[0]
+                w13_chunks = []
+                for i in range(E13):
+                    w13_chunks.append(
+                        dequant_mxfp8_to_bf16(
+                            layer.w13_weight.data[i], layer.w13_weight_scale.data[i]
+                        )
+                    )
+                w13_bf16 = torch.stack(w13_chunks, dim=0).contiguous()
+                del w13_chunks
+                torch.cuda.empty_cache()
+                E2 = layer.w2_weight.shape[0]
+                w2_chunks = []
+                for i in range(E2):
+                    w2_chunks.append(
+                        dequant_mxfp8_to_bf16(
+                            layer.w2_weight.data[i], layer.w2_weight_scale.data[i]
+                        )
+                    )
+                w2_bf16 = torch.stack(w2_chunks, dim=0).contiguous()
+                del w2_chunks
+                torch.cuda.empty_cache()
+            try:
+                # V50 v11: same transform pipeline trtllm_bf16_moe expects from the
+                # BF16 production checkpoint. Reorder + shuffle_matrix_a per expert,
+                # then BlockMajorK reshape.
+                from flashinfer import reorder_rows_for_gated_act_gemm, shuffle_matrix_a
+                from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+                    swap_w13_to_w31,
+                )
+                epilogue_tile_m = 128
+                block_k = 128
+                # w13: gated layout. Apply swap_w13_to_w31 + reorder_rows + shuffle.
+                w13_in = swap_w13_to_w31(w13_bf16)
+                w13_chunks_sh = []
+                for e in range(w13_in.shape[0]):
+                    w_e = reorder_rows_for_gated_act_gemm(w13_in[e].clone())
+                    w_e = shuffle_matrix_a(w_e, epilogue_tile_m)
+                    w13_chunks_sh.append(w_e.contiguous())
+                w13_sh = torch.stack(w13_chunks_sh, dim=0).contiguous()
+                del w13_chunks_sh, w13_in, w13_bf16
+                torch.cuda.empty_cache()
+                # w2: no gated swap; shuffle only.
+                w2_chunks_sh = []
+                for e in range(w2_bf16.shape[0]):
+                    w2_chunks_sh.append(shuffle_matrix_a(w2_bf16[e], epilogue_tile_m).contiguous())
+                w2_sh = torch.stack(w2_chunks_sh, dim=0).contiguous()
+                del w2_chunks_sh, w2_bf16
+                torch.cuda.empty_cache()
+                # BlockMajorK reshape: [E, M, K] -> [E, K/128, M, 128]
+                Ew, Mw, Kw = w13_sh.shape
+                assert Kw % block_k == 0
+                w13_bmk = w13_sh.reshape(Ew, Mw, Kw // block_k, block_k).permute(0, 2, 1, 3).contiguous()
+                del w13_sh
+                torch.cuda.empty_cache()
+                Ew2, Mw2, Kw2 = w2_sh.shape
+                assert Kw2 % block_k == 0
+                w2_bmk = w2_sh.reshape(Ew2, Mw2, Kw2 // block_k, block_k).permute(0, 2, 1, 3).contiguous()
+                del w2_sh
+                torch.cuda.empty_cache()
+                layer.w13_weight_bf16 = Parameter(w13_bmk, requires_grad=False)
+                layer.w2_weight_bf16 = Parameter(w2_bmk, requires_grad=False)
+                import sys
+                sys.stderr.write(
+                    f"[V50 SUCCESS] cached layer "
+                    f"{ModelOptMxFp8FusedMoE._hybrid_moe_bf16_count}/{_max_layers} "
+                    f"w13={tuple(w13_bmk.shape)} w2={tuple(w2_bmk.shape)} "
+                    f"(bf16 size={(w13_bmk.numel() + w2_bmk.numel())*2/1e9:.2f}GB BlockMajorK)\n"
+                )
+                sys.stderr.flush()
+            except Exception as _ev50:
+                import sys, traceback
+                sys.stderr.write(f"[V50 EXCEPTION] {type(_ev50).__name__}: {_ev50}\n")
+                traceback.print_exc(file=sys.stderr)
+                sys.stderr.flush()
+                raise
         self._shuffle_weights_for_trtllm(layer)
 
     def maybe_make_prepare_finalize(
@@ -1994,6 +2113,67 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
         # Treat 0 as "unset" for compatibility with ungrouped routing configs.
         n_group = layer.num_expert_group or None
         topk_group = layer.topk_group or None
+
+        # V50 HYBRID MOE: at small M, dispatch to bf16 MoE kernel using the
+        # cached bf16 expert weights. Layers without bf16 cache fall through
+        # to the fp8 path.
+        import os as _os_hyb
+        _hyb_thresh = int(_os_hyb.environ.get("VLLM_MXFP8_HYBRID_MOE_BF16_THRESHOLD", "128"))
+        if (
+            _os_hyb.environ.get("VLLM_MXFP8_HYBRID_MOE_BF16") == "1"
+            and hasattr(layer, "w13_weight_bf16")
+            and x.shape[0] < _hyb_thresh
+        ):
+            # V50 v12: use vllm's Triton fused_experts (same kernel BF16 unquant path uses)
+            from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
+            from vllm.model_executor.layers.fused_moe.activation import MoEActivation as _MoEAct
+            x_bf16 = x.to(torch.bfloat16) if x.dtype != torch.bfloat16 else x
+            # Compute routing in PyTorch (renormalize: softmax → topk → /sum)
+            _scores = torch.softmax(router_logits.float(), dim=-1)
+            _topk_w, _topk_i = _scores.topk(layer.top_k, dim=-1)
+            _topk_w = (_topk_w / _topk_w.sum(dim=-1, keepdim=True)).to(torch.bfloat16)
+            _topk_i = _topk_i.to(torch.int32)
+            # Expert map: global → local (linear EP mapping)
+            if not hasattr(layer, "_v50_expert_map"):
+                _emap = torch.full(
+                    (layer.global_num_experts,), -1, dtype=torch.int32, device=x.device
+                )
+                _off = layer.ep_rank * layer.local_num_experts
+                _emap[_off:_off + layer.local_num_experts] = torch.arange(
+                    layer.local_num_experts, dtype=torch.int32, device=x.device
+                )
+                layer._v50_expert_map = _emap
+            return fused_experts(
+                hidden_states=x_bf16,
+                w1=layer.w13_weight_bf16,
+                w2=layer.w2_weight_bf16,
+                topk_weights=_topk_w,
+                topk_ids=_topk_i,
+                activation=_MoEAct.SILU,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer._v50_expert_map,
+            )
+            # Below is unreachable (kept for diff readability)
+            from vllm.utils.flashinfer import flashinfer_trtllm_bf16_moe
+            return flashinfer_trtllm_bf16_moe(
+                routing_logits=router_logits,
+                routing_bias=layer.e_score_correction_bias,
+                hidden_states=x_bf16,
+                gemm1_weights=layer.w13_weight_bf16,
+                gemm2_weights=layer.w2_weight_bf16,
+                num_experts=layer.global_num_experts,
+                top_k=layer.top_k,
+                n_group=n_group,
+                topk_group=topk_group,
+                intermediate_size=layer.intermediate_size_per_partition,
+                local_expert_offset=layer.ep_rank * layer.local_num_experts,
+                local_num_experts=layer.local_num_experts,
+                routed_scaling_factor=layer.routed_scaling_factor,
+                routing_method_type=layer.routing_method_type,
+                use_shuffled_weight=True,
+                weight_layout=2,  # BlockMajorK — required by trtllm_bf16_moe
+                activation_type=fi_activation_type,
+            )
 
         if x_mxfp8 is not None and x_mxfp8_scale is not None:
             # Fix D opt-in: use pre-quantized tensors from caller

@@ -6,10 +6,10 @@ This is useful specifically for JIT'ed kernels as we don't want JIT'ing to
 happen during model execution.
 """
 
+import os
 from typing import TYPE_CHECKING
 
 import torch
-
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
@@ -90,7 +90,12 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     """
     import vllm.utils.flashinfer as fi_utils
 
-    with torch.inference_mode(), fi_utils.autotune():
+    # Optional shared autotune cache. When VLLM_FI_AUTOTUNE_CACHE points to a
+    # file, FlashInfer loads tactic selections from it (and saves them on first
+    # run), which pins tactics across cold boots and skips re-profiling — saving
+    # tens of minutes of autotuning on every serve start.
+    fi_autotune_cache = os.environ.get("VLLM_FI_AUTOTUNE_CACHE") or None
+    with torch.inference_mode(), fi_utils.autotune(cache=fi_autotune_cache):
         # Certain FlashInfer kernels (e.g. nvfp4 routed moe) are
         # incompatible with autotuning. This state is used to skip
         # those kernels during the autotuning process.

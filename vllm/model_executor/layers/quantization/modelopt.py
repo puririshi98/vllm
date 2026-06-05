@@ -2084,18 +2084,26 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             hyb_thresh = int(
                 os.environ.get("VLLM_MXFP8_HYBRID_MOE_BF16_THRESHOLD", "128")
             )
-            v50_in_tune_mode = False
-            if os.environ.get("VLLM_MXFP8_HYBRID_MOE_BF16") == "1":
-                # Fire during warmup autotune (any M) so the bf16 kernel gets
-                # tuned, not just at small-M inference.
-                try:
-                    from flashinfer.autotuner import AutoTuner
-
-                    v50_in_tune_mode = bool(AutoTuner.get().is_tuning_mode)
-                except Exception:
-                    v50_in_tune_mode = False
-            v50_fires = os.environ.get("VLLM_MXFP8_HYBRID_MOE_BF16") == "1" and (
-                x.shape[0] < hyb_thresh or v50_in_tune_mode
+            # Correctness gate: V50 fires ONLY at small-M *inference*, never
+            # during autotune. Two empirical findings on Nemotron Ultra (real
+            # MXFP8 ckpt, H=8192, non-gated relu2 MoE) drove this:
+            #   1. The trtllm bf16 MoE kernel BMM-crashes at Ultra dims on the
+            #      large-M (M=65536) autotune shape
+            #      (trtllm_batched_gemm_runner.cu:265). Firing during autotune
+            #      ("any M") therefore destabilizes warmup whenever V50 is on.
+            #   2. A with/without output A/B (V50 off vs on, identical prompts,
+            #      greedy) showed V50-on is NOT output-faithful to the fp8
+            #      baseline: 3/12 identical completions, mean token-match 0.36
+            #      (matched-token logprob |Δ| mean 0.006, max 0.137). The bf16
+            #      weight prep that is cos=1.0 at small proxy dims does not
+            #      reproduce the fp8 MoE at Ultra dims.
+            # V50 is thus an OPT-IN perf experiment, unverified for output
+            # fidelity at Ultra scale. Keep it disabled (MAX_LAYERS=0, the
+            # default): in that mode w13_weight_bf16 is never built, this whole
+            # block is inert, and the PR is output-identical to baseline.
+            v50_fires = (
+                os.environ.get("VLLM_MXFP8_HYBRID_MOE_BF16") == "1"
+                and x.shape[0] < hyb_thresh
             )
         else:
             v50_fires = False

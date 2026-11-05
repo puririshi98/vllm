@@ -180,6 +180,9 @@ class B12xNvFp4W4A16LinearKernel(B12xNvFp4LinearKernel):
             layer.b12x_nvfp4_plan = blockscaled.plan_regimes(
                 query,
                 exact_m=tuple(sorted({m for m in capture_sizes if 0 < m < capacity})),
+                # Decode batches outside the capture sizes (eager runs) use a
+                # config sized for decode rather than for the full capacity.
+                a16_max_tokens=min(config.scheduler_config.max_num_seqs, capacity),
             )
             layer.b12x_nvfp4_plan_query = query
 

@@ -1109,6 +1109,8 @@ def test_b12x_nvfp4_w4a16_quantizes_activations_above_cutoff(
         ("data_parallel", "does not support data parallelism"),
         ("elastic_ep", "does not support data parallelism"),
         ("encoder_cudagraphs", "encoder CUDA graphs"),
+        ("prompt_embeds", "client-supplied prompt or multimodal embeddings"),
+        ("mm_embeds", "client-supplied prompt or multimodal embeddings"),
     ],
 )
 @torch.inference_mode()
@@ -1128,6 +1130,14 @@ def test_b12x_nvfp4_w4a16_a16_max_tokens_rejects_unsafe_rows(
     config.parallel_config.enable_elastic_ep = setting == "elastic_ep"
     config.compilation_config.cudagraph_mm_encoder = setting == "encoder_cudagraphs"
     layer, _ = _nvfp4_w4a16_layer(256, 256)
+    if setting in ("prompt_embeds", "mm_embeds"):
+        # One request's embeddings would set the scale of every request.
+        config.model_config = types.SimpleNamespace(
+            enable_prompt_embeds=setting == "prompt_embeds",
+            multimodal_config=types.SimpleNamespace(
+                enable_mm_embeds=setting == "mm_embeds"
+            ),
+        )
     with pytest.raises(ValueError, match=match):
         B12xNvFp4W4A16LinearKernel(None).process_weights_after_loading(layer)
 
@@ -1151,6 +1161,17 @@ def test_b12x_nvfp4_w4a16_preserves_bf16_activations_under_graph_replay(
         pytest.fail("W4A16 must not quantize activations")
 
     monkeypatch.setattr(b12x_mod, "scaled_fp4_quant", reject_activation_quantization)
+    # b12x quantizes inside its GEMM, so also check the mode of every call.
+    blockscaled = b12x_mod._import_b12x_blockscaled()
+    assert blockscaled is not None
+    modes = []
+    real_mm = blockscaled.mm
+
+    def recording_mm(*args, **kwargs):
+        modes.append(kwargs.get("required_mode"))
+        return real_mm(*args, **kwargs)
+
+    monkeypatch.setattr(blockscaled, "mm", recording_mm)
     layer, decoded = _nvfp4_w4a16_layer(n, k)
     x_storage = torch.randn(1, m, k * 2, device="cuda", dtype=torch.bfloat16)
     x = x_storage[..., ::2]
@@ -1173,6 +1194,7 @@ def test_b12x_nvfp4_w4a16_preserves_bf16_activations_under_graph_replay(
         graph.replay()
         expected = (x.double() @ decoded.double().T).bfloat16() + bias
         torch.testing.assert_close(actual, expected, atol=0.005, rtol=0.01)
+    assert modes and set(modes) == {"a16"}
 
 
 def _block_weights(n, k, codec):

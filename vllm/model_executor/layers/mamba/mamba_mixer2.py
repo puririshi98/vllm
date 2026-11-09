@@ -24,6 +24,7 @@ from vllm.model_executor.custom_op import CustomOp, PluggableLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -291,6 +292,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        in_proj_rank: int | None = None,
+        out_proj_rank: int | None = None,
     ):
         super().__init__()
 
@@ -344,6 +347,31 @@ class MambaMixer2(MambaBase, PluggableLayer):
         self.groups_ssm_state_size = self.n_groups * self.ssm_state_size
         self.conv_dim = intermediate_size + 2 * self.groups_ssm_state_size
 
+        for name, rank in (
+            ("in_proj_rank", in_proj_rank),
+            ("out_proj_rank", out_proj_rank),
+        ):
+            if rank is not None and rank <= 0:
+                raise ValueError(f"{name} must be positive, got {rank}")
+        self.in_proj_rank = in_proj_rank
+        self.out_proj_rank = out_proj_rank
+        in_proj_input_size = hidden_size
+        in_proj_prefix = f"{prefix}.in_proj"
+        if in_proj_rank is not None:
+            # A rank-r in_proj is stored as in_proj_b @ in_proj_a. in_proj_a
+            # ([r, hidden_size]) is replicated and in_proj_b is sharded like
+            # the full in_proj, so the factored form adds no communication.
+            self.in_proj_a = ReplicatedLinear(
+                hidden_size,
+                in_proj_rank,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.in_proj_a",
+            )
+            in_proj_input_size = in_proj_rank
+            in_proj_prefix = f"{prefix}.in_proj_b"
+
+        in_proj: MergedColumnParallelLinear | ColumnParallelLinear
         if n_groups % self.tp_size == 0:
             self.conv1d = MergedColumnParallelLinear(
                 input_size=conv_kernel_size,
@@ -357,8 +385,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 prefix=f"{prefix}.conv1d",
             )
 
-            self.in_proj = MergedColumnParallelLinear(
-                input_size=hidden_size,
+            in_proj = MergedColumnParallelLinear(
+                input_size=in_proj_input_size,
                 output_sizes=[
                     intermediate_size,
                     intermediate_size,
@@ -368,7 +396,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 ],
                 bias=use_bias,
                 quant_config=quant_config,
-                prefix=f"{prefix}.in_proj",
+                prefix=in_proj_prefix,
             )
         else:
             # This is the n_groups == 1 case,
@@ -382,12 +410,12 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 prefix=f"{prefix}.conv1d",
             )
 
-            self.in_proj = ColumnParallelLinear(
-                input_size=hidden_size,
+            in_proj = ColumnParallelLinear(
+                input_size=in_proj_input_size,
                 output_size=intermediate_size + self.conv_dim + self.num_heads,
                 bias=use_bias,
                 quant_config=quant_config,
-                prefix=f"{prefix}.in_proj",
+                prefix=in_proj_prefix,
             )
 
             # - because in_proj is a concatenation of 3 weights, we
@@ -458,7 +486,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
             # Works for both non-quantized (Parameter) and quantized
             # (ModelWeightParameter which extends BasevLLMParameter)
             for attr_name in ("weight", "weight_scale", "input_scale"):
-                param = getattr(self.in_proj, attr_name, None)
+                param = getattr(in_proj, attr_name, None)
                 if param is not None:
                     if isinstance(param, BasevLLMParameter):
                         param.weight_loader = mamba_loader
@@ -466,6 +494,11 @@ class MambaMixer2(MambaBase, PluggableLayer):
                         if hasattr(param, "weight_loader"):
                             delattr(param, "weight_loader")
                         set_weight_attrs(param, {"weight_loader": mamba_loader})
+
+        if in_proj_rank is None:
+            self.in_proj = in_proj
+        else:
+            self.in_proj_b = in_proj
 
         # unsqueeze to fit conv1d weights shape into the linear weights shape.
         # Can't do this in `weight_loader` since it already exists in
@@ -496,14 +529,35 @@ class MambaMixer2(MambaBase, PluggableLayer):
         set_weight_attrs(self.A, {"weight_loader": a_weight_loader})
         set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
 
-        self.out_proj = RowParallelLinear(
-            intermediate_size,
-            hidden_size,
-            bias=use_bias,
-            input_is_parallel=True,
-            quant_config=quant_config,
-            prefix=f"{prefix}.out_proj",
-        )
+        if out_proj_rank is None:
+            self.out_proj = RowParallelLinear(
+                intermediate_size,
+                hidden_size,
+                bias=use_bias,
+                input_is_parallel=True,
+                quant_config=quant_config,
+                prefix=f"{prefix}.out_proj",
+            )
+        else:
+            # A rank-r out_proj is stored as out_proj_b @ out_proj_a.
+            # out_proj_a ([r, intermediate_size]) is sharded on its input like
+            # the full out_proj, so the all-reduce carries r values per token
+            # instead of hidden_size; out_proj_b is replicated.
+            self.out_proj_a = RowParallelLinear(
+                intermediate_size,
+                out_proj_rank,
+                bias=False,
+                input_is_parallel=True,
+                quant_config=quant_config,
+                prefix=f"{prefix}.out_proj_a",
+            )
+            self.out_proj_b = ReplicatedLinear(
+                out_proj_rank,
+                hidden_size,
+                bias=use_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.out_proj_b",
+            )
 
         self.norm = Mixer2RMSNormGated(
             intermediate_size, n_groups, self.use_rms_norm, eps=rms_norm_eps
@@ -580,7 +634,10 @@ class MambaMixer2(MambaBase, PluggableLayer):
         mup_vector: torch.Tensor | None = None,
     ):
         # 1. Gated MLP's linear projection
-        projected_states, _ = self.in_proj(hidden_states)
+        if self.in_proj_rank is None:
+            projected_states, _ = self.in_proj(hidden_states)
+        else:
+            projected_states, _ = self.in_proj_b(self.in_proj_a(hidden_states)[0])
         if mup_vector is not None:
             projected_states = projected_states * mup_vector
 
@@ -611,7 +668,10 @@ class MambaMixer2(MambaBase, PluggableLayer):
         hidden_states = self.norm(ssm_output, gate)
 
         # 5. Final linear projection
-        output, _ = self.out_proj(hidden_states)
+        if self.out_proj_rank is None:
+            output, _ = self.out_proj(hidden_states)
+        else:
+            output, _ = self.out_proj_b(self.out_proj_a(hidden_states)[0])
 
         return output
 

@@ -387,13 +387,13 @@ class NemotronHMambaDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.config = config
-        # Puzzle checkpoints may set the low-rank projection ranks per block.
+        # Get per-layer config for heterogeneous models if exists
         get_layer_config = getattr(config, "get_nemotron_h_config_for_layer", None)
-        layer_config = get_layer_config(layer_idx) if get_layer_config else config
+        config = get_layer_config(layer_idx) if get_layer_config else config
         low_rank_kwargs = {
             name: rank
             for name in ("in_proj_rank", "out_proj_rank")
-            if (rank := getattr(layer_config, f"mamba_{name}", None)) is not None
+            if (rank := getattr(config, f"mamba_{name}", None)) is not None
         }
         self.mixer = MambaMixer2(
             hidden_size=config.hidden_size,

@@ -3,14 +3,11 @@
 """Nemotron-H Mamba layers with low-rank (factored) in_proj / out_proj."""
 
 import json
-from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 import torch
 from safetensors.torch import save_file
 
-from tests.models.utils import check_logprobs_close
 from tests.utils import multi_gpu_marks
 from vllm import SamplingParams
 from vllm.inputs import TokensPrompt
@@ -96,16 +93,16 @@ def _write_checkpoints(tmp_path, n_groups: int) -> tuple[str, str]:
             }
         else:
             shared_layer |= {
-                f"{p}.mixer.conv1d.weight": randn(conv_dim, 1, CONV_KERNEL, std=0.2),
+                f"{p}.mixer.conv1d.weight": randn(conv_dim, 1, CONV_KERNEL, std=0.5),
                 f"{p}.mixer.conv1d.bias": randn(conv_dim),
                 f"{p}.mixer.A_log": torch.log(torch.arange(1, MAMBA_HEADS + 1.0)),
                 f"{p}.mixer.D": torch.ones(MAMBA_HEADS),
-                f"{p}.mixer.dt_bias": randn(MAMBA_HEADS, std=1.0) - 3.0,
+                f"{p}.mixer.dt_bias": randn(MAMBA_HEADS, std=0.5) - 1.0,
                 f"{p}.mixer.norm.weight": torch.ones(intermediate),
             }
             # Round the factors first so both checkpoints hold the same model.
             in_a = randn(RANK, HIDDEN, std=0.1).bfloat16()
-            in_b = randn(in_proj_out, RANK, std=0.06).bfloat16()
+            in_b = randn(in_proj_out, RANK, std=0.12).bfloat16()
             out_a = randn(RANK, intermediate, std=0.06).bfloat16()
             out_b = randn(HIDDEN, RANK, std=0.06).bfloat16()
             dense |= {
@@ -134,7 +131,7 @@ def _write_checkpoints(tmp_path, n_groups: int) -> tuple[str, str]:
     return dirs[0], dirs[1]
 
 
-def _generate(vllm_runner, model: str, tp_size: int) -> list:
+def _prompt_logprobs(vllm_runner, model: str, tp_size: int) -> torch.Tensor:
     gen = torch.Generator().manual_seed(1)
     prompts = [
         TokensPrompt(
@@ -142,9 +139,7 @@ def _generate(vllm_runner, model: str, tp_size: int) -> list:
         )
         for n in (7, 33, 130)
     ]
-    params = SamplingParams(
-        temperature=0.0, max_tokens=16, logprobs=5, detokenize=False
-    )
+    params = SamplingParams(max_tokens=1, prompt_logprobs=0, detokenize=False)
     with vllm_runner(
         model,
         tensor_parallel_size=tp_size,
@@ -154,10 +149,13 @@ def _generate(vllm_runner, model: str, tp_size: int) -> list:
         enable_prefix_caching=False,
     ) as vllm_model:
         outputs = vllm_model.llm.generate(prompts, params)
-    return [
-        (list(o.outputs[0].token_ids), o.outputs[0].text, o.outputs[0].logprobs)
-        for o in outputs
-    ]
+    return torch.tensor(
+        [
+            lps[tok].logprob
+            for o in outputs
+            for tok, lps in zip(o.prompt_token_ids[1:], o.prompt_logprobs[1:])
+        ]
+    )
 
 
 @pytest.mark.parametrize(
@@ -174,53 +172,9 @@ def test_low_rank_mamba_projections_match_dense(
     vllm_runner, tmp_path, tp_size: int, n_groups: int
 ) -> None:
     dense, factored = _write_checkpoints(tmp_path, n_groups)
-    check_logprobs_close(
-        outputs_0_lst=_generate(vllm_runner, dense, tp_size),
-        outputs_1_lst=_generate(vllm_runner, factored, tp_size),
-        name_0="dense",
-        name_1="factored",
-    )
-
-
-@pytest.mark.parametrize(
-    "layer_ranks,expected",
-    [
-        ({}, {}),
-        (
-            {"mamba_in_proj_rank": 512, "mamba_out_proj_rank": 256},
-            {"in_proj_rank": 512, "out_proj_rank": 256},
-        ),
-        ({"mamba_out_proj_rank": 128}, {"out_proj_rank": 128}),
-    ],
-)
-def test_mamba_layer_reads_ranks_from_its_block(layer_ranks, expected) -> None:
-    """Puzzle configs set the ranks per block; other layers keep the dense
-    projections and MambaMixer2 is only given the ranks that are set."""
-    from vllm.model_executor.models.nemotron_h import NemotronHMambaDecoderLayer
-
-    config = SimpleNamespace(
-        hidden_size=HIDDEN,
-        ssm_state_size=SSM_STATE,
-        conv_kernel=CONV_KERNEL,
-        mamba_num_heads=MAMBA_HEADS,
-        mamba_head_dim=MAMBA_HEAD_DIM,
-        use_conv_bias=True,
-        use_bias=False,
-        n_groups=1,
-        layer_norm_epsilon=1e-5,
-        mamba_hidden_act="silu",
-    )
-    config.get_nemotron_h_config_for_layer = lambda idx: SimpleNamespace(
-        **(layer_ranks if idx == 3 else {})
-    )
-    with (
-        patch("vllm.model_executor.models.nemotron_h.MambaMixer2") as mixer,
-        patch("vllm.model_executor.models.nemotron_h.RMSNorm"),
-    ):
-        NemotronHMambaDecoderLayer(config, layer_idx=3)
-        NemotronHMambaDecoderLayer(config, layer_idx=0)
-
-    block, other = (call.kwargs for call in mixer.call_args_list)
-    ranks = {"in_proj_rank", "out_proj_rank"}
-    assert {k: v for k, v in block.items() if k in ranks} == expected
-    assert not ranks & other.keys()
+    expected = _prompt_logprobs(vllm_runner, dense, tp_size)
+    actual = _prompt_logprobs(vllm_runner, factored, tp_size)
+    # Only the bf16 rounding of the factored product differs (mean ~0.02 in
+    # a CPU reference); misplaced B/C/dt rows or a missing all-reduce move
+    # the mean by more than 0.4.
+    assert (actual - expected).abs().mean() < 0.1

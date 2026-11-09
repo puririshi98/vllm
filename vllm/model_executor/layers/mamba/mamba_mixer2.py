@@ -541,8 +541,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
         else:
             # A rank-r out_proj is stored as out_proj_b @ out_proj_a.
             # out_proj_a ([r, intermediate_size]) is sharded on its input like
-            # the full out_proj, so the all-reduce carries r values per token
-            # instead of hidden_size; out_proj_b is replicated.
+            # the full out_proj and out_proj_b is replicated.
             self.out_proj_a = RowParallelLinear(
                 intermediate_size,
                 out_proj_rank,

@@ -390,11 +390,12 @@ class NemotronHMambaDecoderLayer(nn.Module):
         # Get per-layer config for heterogeneous models if exists
         get_layer_config = getattr(config, "get_nemotron_h_config_for_layer", None)
         config = get_layer_config(layer_idx) if get_layer_config else config
-        # A rank of 0 keeps that projection dense in a per-block config.
+        # Pass only the ranks that are set, so out-of-tree MambaMixer2
+        # replacements without these arguments keep working.
         low_rank_kwargs = {
             name: rank
             for name in ("in_proj_rank", "out_proj_rank")
-            if (rank := getattr(config, f"mamba_{name}", None))
+            if (rank := getattr(config, f"mamba_{name}", None)) is not None
         }
         self.mixer = MambaMixer2(
             hidden_size=config.hidden_size,

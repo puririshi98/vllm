@@ -518,13 +518,13 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 !!! note
     Nemotron-H checkpoints can store each Mamba layer's `in_proj` and `out_proj`
     as two low-rank factors. Set `mamba_in_proj_rank` and/or `mamba_out_proj_rank`
-    in the model config (Puzzle checkpoints may set them per block in
-    `block_configs`, with 0 keeping a block dense) and store `mixer.in_proj_a` (`[rank, hidden_size]`) with
-    `mixer.in_proj_b` (`[in_proj outputs, rank]`), and `mixer.out_proj_a`
-    (`[rank, intermediate_size]`) with `mixer.out_proj_b` (`[hidden_size, rank]`).
-    The layer computes `in_proj_b(in_proj_a(x))`; quantized checkpoints declare
-    each factor in their quantization config, and the rank must suit the kernel
-    (a multiple of 16 for NVFP4).
+    in the language-model config, and store `mixer.in_proj_a`
+    (`[rank, hidden_size]`) and `mixer.in_proj_b` (`[in_proj output size, rank]`)
+    in place of `mixer.in_proj`, and `mixer.out_proj_a`
+    (`[rank, mamba_num_heads * mamba_head_dim]`) and `mixer.out_proj_b`
+    (`[hidden_size, rank]`) in place of `mixer.out_proj`. The layer computes
+    `in_proj_b(in_proj_a(x))`. Quantized checkpoints list each factor in their
+    quantization config, and the rank must be supported by the quantized kernel.
 
 ## List of Multimodal Language Models
 

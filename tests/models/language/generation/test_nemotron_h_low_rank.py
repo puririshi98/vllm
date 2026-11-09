@@ -8,7 +8,7 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
-from tests.utils import multi_gpu_marks
+from tests.utils import multi_gpu_test
 from vllm import SamplingParams
 from vllm.inputs import TokensPrompt
 
@@ -158,23 +158,25 @@ def _prompt_logprobs(vllm_runner, model: str, tp_size: int) -> torch.Tensor:
     )
 
 
-@pytest.mark.parametrize(
-    "tp_size,n_groups",
-    [
-        (1, 2),
-        # n_groups=1 shards in_proj_b with Mamba's group-replicating loader;
-        # n_groups=2 shards it as a merged column-parallel layer.
-        pytest.param(2, 1, marks=multi_gpu_marks(num_gpus=2)),
-        pytest.param(2, 2, marks=multi_gpu_marks(num_gpus=2)),
-    ],
-)
-def test_low_rank_mamba_projections_match_dense(
-    vllm_runner, tmp_path, tp_size: int, n_groups: int
-) -> None:
+def _check_factored_matches_dense(vllm_runner, tmp_path, tp_size, n_groups):
     dense, factored = _write_checkpoints(tmp_path, n_groups)
     expected = _prompt_logprobs(vllm_runner, dense, tp_size)
     actual = _prompt_logprobs(vllm_runner, factored, tp_size)
     # Only the bf16 rounding of the factored product differs (mean ~0.02 in
     # a CPU reference); misplaced B/C/dt rows or a missing all-reduce move
-    # the mean by more than 0.4.
+    # the mean by more than 0.5.
     assert (actual - expected).abs().mean() < 0.1
+
+
+def test_low_rank_mamba_projections_match_dense(vllm_runner, tmp_path) -> None:
+    _check_factored_matches_dense(vllm_runner, tmp_path, tp_size=1, n_groups=2)
+
+
+@multi_gpu_test(num_gpus=2)
+# n_groups=1 shards in_proj_b with Mamba's group-replicating loader;
+# n_groups=2 shards it as a merged column-parallel layer.
+@pytest.mark.parametrize("n_groups", [1, 2])
+def test_low_rank_mamba_projections_match_dense_tp2(
+    vllm_runner, tmp_path, n_groups: int
+) -> None:
+    _check_factored_matches_dense(vllm_runner, tmp_path, tp_size=2, n_groups=n_groups)

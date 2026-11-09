@@ -515,6 +515,17 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 !!! note
     Currently, the ROCm version of vLLM supports Mistral and Mixtral only for context lengths up to 4096.
 
+!!! note
+    Nemotron-H checkpoints can store each Mamba layer's `in_proj` and `out_proj`
+    as two low-rank factors. Set `mamba_in_proj_rank` and/or `mamba_out_proj_rank`
+    in the model config (Puzzle checkpoints may set them per block in
+    `block_configs`, with 0 keeping a block dense) and store `mixer.in_proj_a` (`[rank, hidden_size]`) with
+    `mixer.in_proj_b` (`[in_proj outputs, rank]`), and `mixer.out_proj_a`
+    (`[rank, intermediate_size]`) with `mixer.out_proj_b` (`[hidden_size, rank]`).
+    The layer computes `in_proj_b(in_proj_a(x))`; quantized checkpoints declare
+    each factor in their quantization config, and the rank must suit the kernel
+    (a multiple of 16 for NVFP4).
+
 ## List of Multimodal Language Models
 
 The following modalities are supported depending on the model:

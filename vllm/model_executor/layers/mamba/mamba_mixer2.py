@@ -347,12 +347,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
         self.groups_ssm_state_size = self.n_groups * self.ssm_state_size
         self.conv_dim = intermediate_size + 2 * self.groups_ssm_state_size
 
-        for name, rank in (
-            ("in_proj_rank", in_proj_rank),
-            ("out_proj_rank", out_proj_rank),
-        ):
-            if rank is not None and rank <= 0:
-                raise ValueError(f"{name} must be positive, got {rank}")
         self.in_proj_rank = in_proj_rank
         self.out_proj_rank = out_proj_rank
         in_proj_input_size = hidden_size

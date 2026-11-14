@@ -7,6 +7,7 @@ import torch
 
 from vllm._custom_ops import scaled_fp4_quant
 from vllm.config import get_current_vllm_config
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.b12x import B12xWarmupUnit, reuse_packed_weight_storage
@@ -141,6 +142,12 @@ class B12xNvFp4LinearKernel(NvFp4LinearKernel):
 
 class B12xNvFp4W4A16LinearKernel(B12xNvFp4LinearKernel):
     """BF16 x NVFP4 GEMM without activation quantization."""
+
+    @classmethod
+    def executed_activation_key(
+        cls, activation_quant_key: QuantKey | None
+    ) -> QuantKey | None:
+        return None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)

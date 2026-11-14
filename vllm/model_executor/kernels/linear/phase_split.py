@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Per-phase activation formats for linear layers (``QuantSpec.phase``).
+"""Per-phase activation formats for linear layers (`QuantSpec.phase`).
 
 A kernel serving several activation formats from one weight copy implements
-``DualActivationKernel``. The kernel oracle sets its ``phase``, and the kernel
+`DualActivationKernel`. The kernel oracle sets its `phase`, and the kernel
 then picks the format per call from the input row count. Under torch.compile
-the choice runs inside the ``vllm::phase_split_linear`` op: vLLM compiles with
+the choice runs inside the `vllm::phase_split_linear` op: vLLM compiles with
 dynamic shapes, so a Python branch on the row count in traced code would be
 fixed for every size.
 """
@@ -55,8 +55,8 @@ _LAYERS: weakref.WeakValueDictionary[str, torch.nn.Module] = (
 
 
 def _register_layer(layer: torch.nn.Module) -> str:
-    """Name ``layer`` uniquely among live phase-split layers: its prefix, or
-    its class name without one, plus the first free ``#n`` suffix when another
+    """Name `layer` uniquely among live phase-split layers: its prefix, or
+    its class name without one, plus the first free `#n` suffix when another
     live layer holds that name."""
     name = layer.__dict__.get("phase_split_layer_name")
     if name is not None and _LAYERS.get(name) is layer:
@@ -77,11 +77,11 @@ def has_phase_split_layers() -> bool:
 
 class DualActivationKernel:
     """Mixin for linear kernels that serve every format in
-    ``activation_modes()`` from one weight copy.
+    `activation_modes()` from one weight copy.
 
-    The kernel oracle sets ``phase`` before ``process_weights_after_loading``,
-    which prepares each phase's shapes and calls ``register_phase_layer``.
-    With a phase, ``apply_weights`` runs ``apply_phase``.
+    The kernel oracle sets `phase` before `process_weights_after_loading`,
+    which prepares each phase's shapes and calls `register_phase_layer`.
+    With a phase, `apply_weights` runs `apply_phase`.
     """
 
     phase: PhaseSpec | None = None
@@ -98,12 +98,12 @@ class DualActivationKernel:
         *,
         mode: ActivationMode,
     ) -> torch.Tensor:
-        """Run the GEMM with activations in ``mode``."""
+        """Run the GEMM with activations in `mode`."""
         raise NotImplementedError
 
     def phase_mode(self, rows: int) -> ActivationMode:
-        """Activations of a call with ``rows`` rows: ``phase.decode`` up to
-        ``phase.max_decode_tokens``, or for every call when it is unset. Under
+        """Activations of a call with `rows` rows: `phase.decode` up to
+        `phase.max_decode_tokens`, or for every call when it is unset. Under
         CUDA graphs the rows are the padded capture size."""
         assert self.phase is not None
         decode, prefill = self.phase.activation_modes()
@@ -111,7 +111,7 @@ class DualActivationKernel:
         return decode if cutoff is None or rows <= cutoff else prefill
 
     def register_phase_layer(self, layer: torch.nn.Module) -> None:
-        """Let ``vllm::phase_split_linear`` find ``layer``."""
+        """Let `vllm::phase_split_linear` find `layer`."""
         layer.phase_split_kernel = self
         layer.phase_split_layer_name = _register_layer(layer)
 
@@ -121,7 +121,7 @@ class DualActivationKernel:
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """``apply_weights`` with a phase."""
+        """`apply_weights` with a phase."""
         out_features = layer.output_size_per_partition
         x_2d = x.reshape(-1, x.shape[-1])
         if torch.compiler.is_compiling():
@@ -143,10 +143,10 @@ class DualActivationKernel:
 class PhasePlans(Generic[_PlanT]):
     """A kernel's prepared plans for one weight under a phase.
 
-    ``modes`` are the (decode, prefill) activations the plans serve; a phase
+    `modes` are the (decode, prefill) activations the plans serve; a phase
     that quantizes can still get None for a layer the kernel cannot quantize.
-    Calls with at most ``cutoff`` rows, or every call when it is None, are
-    decode calls. ``capacity`` is the largest planned call, and ``key`` says
+    Calls with at most `cutoff` rows, or every call when it is None, are
+    decode calls. `capacity` is the largest planned call, and `key` says
     what the plans were prepared for, so a reload with an equal key keeps them.
     """
 
@@ -172,7 +172,7 @@ class PhasePlans(Generic[_PlanT]):
         return decode if decode is not None else prefill
 
     def select(self, rows: int, mode: ActivationMode) -> tuple[_PlanT, ActivationMode]:
-        """The plan of a call with ``rows`` rows in ``mode``, and the
+        """The plan of a call with `rows` rows in `mode`, and the
         activations it runs with: None where the plans do not quantize."""
         decode = self.cutoff is None or rows <= self.cutoff
         if self.modes[0 if decode else 1] is None:
@@ -281,8 +281,8 @@ def maybe_phase_split(
     weight: str,
     candidates: Iterable[type] = (),
 ) -> _KernelT:
-    """Set ``kernel``'s phase, or raise if it cannot serve both phases from
-    one weight copy. ``candidates`` are named in the error when they can."""
+    """Set `kernel`'s phase, or raise if it cannot serve both phases from
+    one weight copy. `candidates` are named in the error when they can."""
     if phase is None:
         return kernel
     _check_batch_invariance(phase)

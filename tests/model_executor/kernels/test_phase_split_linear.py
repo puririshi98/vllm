@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CPU tests for per-phase linear activations (``QuantSpec.phase``)."""
+"""CPU tests for per-phase linear activations (`QuantSpec.phase`)."""
 
 from __future__ import annotations
 
@@ -330,7 +330,7 @@ def test_phase_split_reports_batch_invariance_first(
 @torch.inference_mode()
 def test_phase_split_op_rejects_wrong_output_shape(vllm_config) -> None:
     """The op's output feeds a traced graph, so a kernel returning the wrong
-    shape raises even under ``python -O``."""
+    shape raises even under `python -O`."""
 
     class _WrongShapeKernel(_DualKernel):
         def apply_mode(self, layer, x, bias=None, *, mode):

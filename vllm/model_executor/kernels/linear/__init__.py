@@ -1038,7 +1038,7 @@ def init_mxfp8_linear_kernel(
 ) -> Mxfp8LinearKernel:
     """Select and instantiate the best MXFP8 linear kernel for the
     current platform and `(N, K)` weight shape, set up for
-    ``quantization_config.linear.phase``.
+    `quantization_config.linear.phase`.
 
     Returns a placeholder for requantization sources, which have no kernel."""
     # TODO: migrate to oracle base method.
@@ -1137,7 +1137,7 @@ def _user_linear_activation_override_is_set() -> bool:
 
 def _user_linear_phase(weight_format: str | None = None) -> PhaseSpec | None:
     """User's quantization_config.linear.phase, or None. With
-    ``weight_format``, only a phase that applies to such linears: one that
+    `weight_format`, only a phase that applies to such linears: one that
     uses that activation format or only unquantized activations."""
     spec = _user_linear_spec()
     phase = None if spec is None else spec.phase
@@ -1341,8 +1341,8 @@ def init_nvfp4_linear_kernel(
     use_a16: bool = False, *, allow_phase_split: bool = True
 ) -> NvFp4LinearKernel:
     """Select and instantiate the best NVFP4 linear kernel for the
-    current platform, set up for ``quantization_config.linear.phase`` when
-    ``allow_phase_split``.
+    current platform, set up for `quantization_config.linear.phase` when
+    `allow_phase_split`.
 
     Returns a placeholder for requantization sources, which have no kernel."""
     # TODO: migrate to oracle base method.
@@ -1480,7 +1480,7 @@ def _select_nvfp4_linear_kernel(use_a16: bool) -> NvFp4LinearKernel:
 
 
 def check_linear_phase_served(model: torch.nn.Module) -> None:
-    """Warn if ``quantization_config.linear.phase`` is set but no loaded layer
+    """Warn if `quantization_config.linear.phase` is set but no loaded layer
     serves it (e.g. in an unquantized model). It is not an error: a pipeline
     stage, an encoder-only instance, or a target whose NVFP4 layers are all in
     its MTP head can legitimately have none. NVFP4 and MXFP8 linears it applies

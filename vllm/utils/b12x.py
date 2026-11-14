@@ -147,7 +147,7 @@ def reuse_packed_weight_storage(current: Any, replacement: Any) -> Any:
 
 
 def b12x_activation_mode(mode: "QuantKey | None") -> str:
-    """b12x's name for activations in ``mode``; None is unquantized."""
+    """b12x's name for activations in `mode`; None is unquantized."""
     return "a16" if mode is None else "quantized"
 
 
@@ -159,10 +159,10 @@ def plan_b12x_linear(
     previous: "PhasePlans | None" = None,
 ) -> "PhasePlans":
     """Declare every serving shape of a packed b12x linear weight, with the
-    activations ``phase`` gives each call; None keeps BF16 activations. An
+    activations `phase` gives each call; None keeps BF16 activations. An
     undeclared token count is prepared on first use, and that preparation
     evicts kernels compiled earlier, including ones already captured in CUDA
-    graphs. ``previous`` is returned when nothing changed, e.g. on a weight
+    graphs. `previous` is returned when nothing changed, e.g. on a weight
     reload."""
     from vllm.config import get_current_vllm_config
     from vllm.model_executor.kernels.linear.phase_split import PhasePlans

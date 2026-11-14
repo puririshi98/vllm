@@ -816,7 +816,7 @@ def _b12x_phase(max_decode_tokens: int | None, **formats: str) -> PhaseSpec:
 
 
 def _with_phase(kernel, phase: PhaseSpec):
-    """``kernel`` with ``phase`` set as the oracle sets it, without the config
+    """`kernel` with `phase` set as the oracle sets it, without the config
     checks."""
     kernel.phase = phase
     return kernel
@@ -1576,7 +1576,7 @@ def test_b12x_nvfp4_w4a16_does_not_prepare_after_warmup(
 
 
 def _nvfp4_activation_reference(x, decoded):
-    """Reference output for NVFP4 activations scaled by amax(x), times ``decoded``."""
+    """Reference output for NVFP4 activations scaled by amax(x), times `decoded`."""
     from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
         ref_nvfp4_quant,
     )
@@ -1594,7 +1594,7 @@ def _nvfp4_activation_reference(x, decoded):
 def test_b12x_nvfp4_w4a16_quantizes_activations_above_cutoff(
     default_vllm_config, magnitude
 ) -> None:
-    """Passes above ``max_decode_tokens`` rows use NVFP4 activations and smaller
+    """Passes above `max_decode_tokens` rows use NVFP4 activations and smaller
     passes keep BF16 ones, decided at execution time under torch.compile: a
     branch in traced code would be fixed for every size."""
     supported, reason = B12xNvFp4W4A16LinearKernel.is_supported()
@@ -1718,7 +1718,7 @@ def _mxfp8_layer(n, k):
 
 
 def _mxfp8_activation_reference(x, decoded):
-    """Reference output for MXFP8 activations, times ``decoded``."""
+    """Reference output for MXFP8 activations, times `decoded`."""
     from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
         _mxfp8_e4m3_quantize_torch,
         dequant_mxfp8_to_bf16,

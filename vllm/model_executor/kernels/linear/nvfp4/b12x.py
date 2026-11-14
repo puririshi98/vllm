@@ -15,6 +15,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
     FLOAT4_E2M1_MAX,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
     kNvfp4DynamicTensor,
 )
 from vllm.model_executor.utils import replace_parameter
@@ -105,7 +106,7 @@ class B12xNvFp4LinearKernel(NvFp4LinearKernel):
             return False, "B12X NVFP4 kernels require a Blackwell 12x device"
         blockscaled = _import_b12x_blockscaled()
         if blockscaled is None or _import_b12x_intrinsics() is None:
-            return False, "Install the B12X backend with `pip install vllm[b12x]`"
+            return False, "The b12x backend requires flashinfer-python>=0.7.2"
         if not blockscaled.is_supported():
             return False, "b12x native NVFP4 GEMM is not supported"
         return True, None
@@ -188,6 +189,12 @@ class B12xNvFp4W4A16LinearKernel(B12xNvFp4LinearKernel, DualActivationKernel):
     @classmethod
     def activation_modes(cls) -> frozenset[ActivationMode]:
         return frozenset((None, kNvfp4DynamicTensor))
+
+    @classmethod
+    def executed_activation_key(
+        cls, activation_quant_key: QuantKey | None
+    ) -> QuantKey | None:
+        return None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)

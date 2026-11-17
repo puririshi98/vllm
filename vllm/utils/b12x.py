@@ -96,6 +96,32 @@ def b12x_warmup_token_counts(
     return tuple(sorted(counts))
 
 
+def b12x_plan_capacity(vllm_config: Any) -> tuple[int, tuple[int, ...]]:
+    """Return the largest row count the scheduler can send to a linear and the
+    CUDA graph capture sizes below it, for planning b12x kernels at load time.
+    A count first seen after capture would be prepared on first use, and that
+    preparation evicts kernels already captured in CUDA graphs."""
+    scheduler = vllm_config.scheduler_config
+    capture_sizes = vllm_config.compilation_config.cudagraph_capture_sizes or []
+    capacity = max(
+        scheduler.max_num_batched_tokens,
+        scheduler.max_num_scheduled_tokens or 0,
+        *capture_sizes,
+    )
+    return capacity, tuple(sorted({m for m in capture_sizes if 0 < m < capacity}))
+
+
+def plan_b12x_blockscaled(api: ModuleType, vllm_config: Any, **query_fields: Any):
+    """Plan a b12x blockscaled linear for every row count it can be called with.
+
+    `query_fields` are the `BlockscaledQuery` fields other than `num_tokens`.
+    Returns the capacity query and its plan.
+    """
+    capacity, exact_m = b12x_plan_capacity(vllm_config)
+    query = api.BlockscaledQuery(num_tokens=capacity, **query_fields)
+    return query, api.plan_regimes(query, exact_m=exact_m)
+
+
 def _same_packed_layout(current: Any, replacement: Any) -> bool:
     if type(current) is not type(replacement):
         return False

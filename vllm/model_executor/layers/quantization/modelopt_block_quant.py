@@ -31,7 +31,9 @@ from vllm.model_executor.parameter import ModelWeightParameter
 from vllm.utils.b12x import (
     B12X_BLOCK_CODECS,
     B12xWarmupUnit,
+    b12x_plan_capacity,
     get_b12x_blockscaled,
+    plan_b12x_blockscaled,
     reuse_packed_weight_storage,
 )
 
@@ -324,13 +326,7 @@ class ModelOptBlockQuantLinearMethod(LinearMethodBase):
         api = get_b12x_blockscaled()
         assert api is not None
         config = get_current_vllm_config()
-        scheduler = config.scheduler_config
-        capture_sizes = config.compilation_config.cudagraph_capture_sizes or []
-        capacity = max(
-            scheduler.max_num_batched_tokens,
-            scheduler.max_num_scheduled_tokens or 0,
-            *capture_sizes,
-        )
+        capacity, _ = b12x_plan_capacity(config)
         weight = layer.weight.data
         if self.is_embedding:
             bases = weight[..., :2].contiguous().view(torch.float16)
@@ -356,17 +352,14 @@ class ModelOptBlockQuantLinearMethod(LinearMethodBase):
                 layer.b12x_embedding_plans[dtype] = plan
         else:
             packed = api.pack_weight(weight, recipe=self.codec)
-            query = api.BlockscaledQuery(
+            _, plan = plan_b12x_blockscaled(
+                api,
+                config,
                 recipe=self.codec,
-                num_tokens=capacity,
                 in_features=packed.in_features,
                 padded_in_features=packed.in_features,
                 out_features=packed.out_features,
                 activation_mode="a16",
-            )
-            plan = api.plan_regimes(
-                query,
-                exact_m=tuple(sorted({m for m in capture_sizes if 0 < m < capacity})),
             )
             layer.b12x_block_weight = reuse_packed_weight_storage(
                 getattr(layer, "b12x_block_weight", None), packed
